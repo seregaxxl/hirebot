@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// key-value: hh_access_token, hh_refresh_token, hh_token_expires_at
+model Setting {
+  key   String @id
+  value String
+}
+
+// Версии резюме с hh.ru (PM / PRODUCT / CTO)
+model ResumeVersion {
+  id           String        @id // hh resume id
+  title        String
+  role         String        @default("PM") // PM | PRODUCT | CTO
+  updatedAt    DateTime      @updatedAt
+  applications Application[]
+}
+
+model Vacancy {
+  id           String       @id // hh vacancy id
+  name         String
+  employerId   String?
+  employerName String
+  areaName     String?
+  salaryFrom   Int?
+  salaryTo     Int?
+  currency     String?
+  url          String
+  description  String? // plain text из hh
+  keySkills    String? // JSON array строк
+  publishedAt  DateTime?
+  hasTest      Boolean      @default(false) // тест/опросник — по API откликнуться нельзя
+  score        Int? // 0-100 релевантность
+  scoreDetails String? // JSON с разбором скоринга
+  status       String       @default("NEW") // NEW | APPLIED | SKIPPED | MANUAL_REQUIRED
+  createdAt    DateTime     @default(now())
+  application  Application?
+}
+
+// Отклик = единица воронки
+model Application {
+  id               Int           @id @default(autoincrement())
+  vacancyId        String        @unique
+  vacancy          Vacancy       @relation(fields: [vacancyId], references: [id])
+  resumeId         String
+  resume           ResumeVersion @relation(fields: [resumeId], references: [id])
+  negotiationId    String?
+  letter           String
+  letterSource     String        @default("TEMPLATE") // LLM | TEMPLATE:<name>
+  // SENT -> VIEWED -> INVITED | DISCARDED, дальше вручную: SCREENING -> INTERVIEW -> FINAL -> OFFER | REJECTED
+  status           String        @default("SENT")
+  viewedByEmployer Boolean       @default(false)
+  sentAt           DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  notes            String?
+  events           StatusEvent[]
+}
+
+model StatusEvent {
+  id            Int         @id @default(autoincrement())
+  applicationId Int
+  application   Application @relation(fields: [applicationId], references: [id])
+  status        String
+  at            DateTime    @default(now())
+  source        String      @default("SYNC") // SYNC | MANUAL
+}
+
+model CoverLetterTemplate {
+  id     Int     @id @default(autoincrement())
+  name   String
+  body   String // поддерживает {position} {company} {name}
+  active Boolean @default(true)
+}
+
+model BlacklistedEmployer {
+  id   String  @id // hh employer id
+  name String?
+}
