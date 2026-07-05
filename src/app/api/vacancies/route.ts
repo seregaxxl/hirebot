@@ -3,17 +3,14 @@ import { prisma } from "@/lib/db";
 import type { Prisma } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
-  const mode = req.nextUrl.searchParams.get("mode") ?? "auto";
+  const mode = req.nextUrl.searchParams.get("mode") ?? "new";
 
   let where: Prisma.VacancyWhereInput;
-  if (mode === "manual") {
-    // с обязательным тестом — только ручной отклик на hh
-    where = { hasTest: true, status: { in: ["NEW", "MANUAL_REQUIRED"] } };
-  } else if (mode === "applied") {
+  if (mode === "applied") {
     where = { status: "APPLIED" };
   } else {
-    // доступны для автоотклика
-    where = { status: "NEW", hasTest: false };
+    // новые в очереди — тест не важен: отклик на hh всё равно ручной
+    where = { status: { in: ["NEW", "MANUAL_REQUIRED"] } };
   }
 
   const vacancies = await prisma.vacancy.findMany({

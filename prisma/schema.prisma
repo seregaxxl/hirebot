@@ -82,3 +82,20 @@ model BlacklistedEmployer {
   id   String  @id // hh employer id
   name String?
 }
+
+// Прямой аутрич как CRM: компания + контакт + этап воронки.
+// stage: PROSPECT -> CONTACTED -> REPLIED -> MEETING -> IN_PROCESS -> WON | LOST
+model Outreach {
+  id          Int      @id @default(autoincrement())
+  company     String
+  contactName String?
+  contactRole String? // Founder | Head of Product | ...
+  contactLink String? // LinkedIn / email
+  domain      String? // devtools | fintech | eng analytics ...
+  channel     String? // LinkedIn | Email | Telegram
+  stage       String   @default("PROSPECT")
+  letter      String? // сгенерированное письмо
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

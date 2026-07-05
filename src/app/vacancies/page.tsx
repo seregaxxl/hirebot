@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type Vacancy = {
   id: string;
@@ -19,16 +19,6 @@ type Vacancy = {
 type Resume = { id: string; title: string; role: string };
 type ChecklistItem = { check: string; pass: boolean; hint: string };
 type Preview = { letter: string; source: string; checklist: ChecklistItem[] };
-type AutoState = {
-  running: boolean;
-  total: number;
-  sent: number;
-  skipped: number;
-  failed: number;
-  current: string | null;
-  limitHit: boolean;
-  log: string[];
-};
 
 const AREAS: [string, string][] = [
   ["", "Все регионы"],
@@ -69,33 +59,20 @@ export default function VacanciesPage() {
   const [message, setMessage] = useState("");
 
   // данные
-  const [tab, setTab] = useState<"auto" | "manual">("auto");
+  const [tab, setTab] = useState<"new" | "applied">("new");
   const [vacancies, setVacancies] = useState<Vacancy[]>([]);
   const [resumes, setResumes] = useState<Resume[]>([]);
   const [selectedResume, setSelectedResume] = useState("");
-
-  // автоотклик
-  const [minScore, setMinScore] = useState("40");
-  const [limit, setLimit] = useState("200");
-  const [useLLM, setUseLLM] = useState(true);
-  const [auto, setAuto] = useState<AutoState | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // письмо-превью
   const [openId, setOpenId] = useState<string | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const loadVacancies = useCallback(async (mode: string) => {
     const res = await fetch(`/api/vacancies?mode=${mode}`);
     setVacancies(await res.json());
-  }, []);
-
-  const pollAuto = useCallback(async () => {
-    const res = await fetch("/api/autoapply");
-    const data: AutoState = await res.json();
-    setAuto(data);
-    return data.running;
   }, []);
 
   useEffect(() => {
@@ -109,28 +86,7 @@ export default function VacanciesPage() {
         setResumes(data);
         if (data[0]) setSelectedResume(data[0].id);
       });
-    // если автоотклик уже крутится (после перезагрузки страницы) — подхватить
-    pollAuto().then((running) => {
-      if (running) startPolling();
-    });
-    return () => stopPolling();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  function startPolling() {
-    stopPolling();
-    pollRef.current = setInterval(async () => {
-      const running = await pollAuto();
-      if (!running) {
-        stopPolling();
-        loadVacancies(tab);
-      }
-    }, 2000);
-  }
-  function stopPolling() {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = null;
-  }
 
   async function search() {
     setSearchBusy(true);
@@ -145,34 +101,18 @@ export default function VacanciesPage() {
       if (!res.ok) setMessage(data.error ?? "Ошибка поиска");
       else {
         setMessage(`Найдено ${data.found}, сохранено и оценено ${data.saved}`);
-        await loadVacancies(tab);
+        setTab("new");
+        await loadVacancies("new");
       }
     } finally {
       setSearchBusy(false);
     }
   }
 
-  async function startAuto() {
-    const res = await fetch("/api/autoapply", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ resumeId: selectedResume, minScore, limit, useLLM }),
-    });
-    const data = await res.json();
-    if (!res.ok) setMessage(data.error ?? "Не удалось запустить");
-    else {
-      await pollAuto();
-      startPolling();
-    }
-  }
-
-  async function stopAuto() {
-    await fetch("/api/autoapply", { method: "DELETE" });
-  }
-
   async function makeLetter(id: string) {
     setOpenId(id);
     setPreview(null);
+    setCopied(false);
     setPreviewBusy(true);
     try {
       const res = await fetch(`/api/vacancies/${id}/letter`, {
@@ -188,27 +128,6 @@ export default function VacanciesPage() {
     }
   }
 
-  async function apply(id: string) {
-    if (!preview || !selectedResume) return;
-    const res = await fetch(`/api/vacancies/${id}/apply`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        resumeId: selectedResume,
-        letter: preview.letter,
-        letterSource: preview.source,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) setMessage(data.error ?? "Ошибка отклика");
-    else {
-      setMessage("Отклик отправлен ✅");
-      setOpenId(null);
-      setPreview(null);
-      await loadVacancies(tab);
-    }
-  }
-
   async function markApplied(id: string) {
     const res = await fetch(`/api/vacancies/${id}/mark-applied`, {
       method: "POST",
@@ -216,14 +135,18 @@ export default function VacanciesPage() {
       body: JSON.stringify({
         resumeId: selectedResume,
         letter: openId === id ? preview?.letter : undefined,
+        letterSource: openId === id ? preview?.source : undefined,
       }),
     });
-    if (res.ok) {
-      setMessage("Отмечено как отправленное ✅");
-      setOpenId(null);
-      setPreview(null);
-      await loadVacancies(tab);
+    const data = await res.json();
+    if (!res.ok) {
+      setMessage(data.error ?? "Ошибка");
+      return;
     }
+    setMessage("Занесено в журнал ✅");
+    setOpenId(null);
+    setPreview(null);
+    await loadVacancies(tab);
   }
 
   async function act(id: string, action: "skip" | "blacklist") {
@@ -235,8 +158,6 @@ export default function VacanciesPage() {
     await loadVacancies(tab);
   }
 
-  const progress = auto && auto.total > 0 ? Math.round(((auto.sent + auto.skipped + auto.failed) / auto.total) * 100) : 0;
-
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Вакансии</h1>
@@ -247,6 +168,7 @@ export default function VacanciesPage() {
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && search()}
             placeholder="Поисковый запрос"
             className="rounded border border-zinc-300 px-3 py-2"
           />
@@ -281,9 +203,9 @@ export default function VacanciesPage() {
           >
             {searchBusy ? "Ищу…" : "Найти и оценить"}
           </button>
-          {resumes.length > 0 && (
-            <label className="flex items-center gap-2 text-sm text-zinc-600">
-              Резюме:
+          <label className="flex items-center gap-2 text-sm text-zinc-600">
+            Резюме:
+            {resumes.length > 0 ? (
               <select
                 value={selectedResume}
                 onChange={(e) => setSelectedResume(e.target.value)}
@@ -293,101 +215,36 @@ export default function VacanciesPage() {
                   <option key={r.id} value={r.id}>{r.title}</option>
                 ))}
               </select>
-            </label>
-          )}
+            ) : (
+              <a href="/settings" className="text-blue-600 hover:underline">
+                добавь версию в настройках
+              </a>
+            )}
+          </label>
           {message && <span className="text-sm text-zinc-500">{message}</span>}
         </div>
       </div>
 
-      {/* Автоотклик */}
-      <div className="rounded-lg border border-zinc-200 bg-white p-4">
-        <h2 className="mb-3 font-semibold">Массовый автоотклик</h2>
-        <div className="flex flex-wrap items-center gap-3 text-sm">
-          <label className="flex items-center gap-1">
-            скоринг ≥
-            <input
-              value={minScore}
-              onChange={(e) => setMinScore(e.target.value)}
-              className="w-16 rounded border border-zinc-300 px-2 py-1"
-            />
-          </label>
-          <label className="flex items-center gap-1">
-            максимум
-            <input
-              value={limit}
-              onChange={(e) => setLimit(e.target.value)}
-              className="w-16 rounded border border-zinc-300 px-2 py-1"
-            />
-            откликов
-          </label>
-          <label className="flex items-center gap-1">
-            письма:
-            <select
-              value={useLLM ? "llm" : "tpl"}
-              onChange={(e) => setUseLLM(e.target.value === "llm")}
-              className="rounded border border-zinc-300 px-2 py-1"
-            >
-              <option value="llm">Claude (персональные, медленнее)</option>
-              <option value="tpl">шаблон (быстро)</option>
-            </select>
-          </label>
-          {!auto?.running ? (
-            <button
-              onClick={startAuto}
-              disabled={!selectedResume}
-              className="rounded-md bg-green-600 px-4 py-2 text-white hover:bg-green-500 disabled:opacity-40"
-            >
-              ▶ Запустить
-            </button>
-          ) : (
-            <button onClick={stopAuto} className="rounded-md bg-red-600 px-4 py-2 text-white hover:bg-red-500">
-              ⏹ Остановить
-            </button>
-          )}
-        </div>
-
-        {auto && (auto.running || auto.sent + auto.failed + auto.skipped > 0) && (
-          <div className="mt-4 space-y-2">
-            <div className="h-2 w-full overflow-hidden rounded bg-zinc-100">
-              <div className="h-full bg-green-500 transition-all" style={{ width: `${progress}%` }} />
-            </div>
-            <div className="text-sm text-zinc-600">
-              Отправлено <b className="text-green-700">{auto.sent}</b> · пропущено {auto.skipped} · ошибок{" "}
-              {auto.failed} из {auto.total}
-              {auto.limitHit && <span className="ml-2 font-medium text-red-600">— лимит hh исчерпан</span>}
-              {auto.current && <span className="ml-2 text-zinc-400">сейчас: {auto.current}</span>}
-            </div>
-            {auto.log.length > 0 && (
-              <pre className="max-h-40 overflow-y-auto rounded bg-zinc-50 p-2 text-xs text-zinc-600">
-                {auto.log.slice(0, 50).join("\n")}
-              </pre>
-            )}
-          </div>
-        )}
-      </div>
+      <p className="text-sm text-zinc-500">
+        Отклик на hh.ru — вручную (API соискателей закрыт). Сгенерируй письмо, скопируй, откликнись
+        на hh по ссылке, затем нажми «Занести в журнал» — так копится аналитика воронки.
+      </p>
 
       {/* Вкладки */}
       <div className="flex gap-2 border-b border-zinc-200 text-sm">
         <button
-          onClick={() => setTab("auto")}
-          className={`px-4 py-2 ${tab === "auto" ? "border-b-2 border-zinc-900 font-semibold" : "text-zinc-500"}`}
+          onClick={() => setTab("new")}
+          className={`px-4 py-2 ${tab === "new" ? "border-b-2 border-zinc-900 font-semibold" : "text-zinc-500"}`}
         >
-          Доступны для отклика
+          Новые
         </button>
         <button
-          onClick={() => setTab("manual")}
-          className={`px-4 py-2 ${tab === "manual" ? "border-b-2 border-zinc-900 font-semibold" : "text-zinc-500"}`}
+          onClick={() => setTab("applied")}
+          className={`px-4 py-2 ${tab === "applied" ? "border-b-2 border-zinc-900 font-semibold" : "text-zinc-500"}`}
         >
-          Только вручную (тест)
+          Откликнулся
         </button>
       </div>
-
-      {tab === "manual" && vacancies.length > 0 && (
-        <p className="text-sm text-zinc-500">
-          Эти вакансии требуют пройти тест — hh не даёт откликнуться по API. Сгенерируй письмо, скопируй,
-          перейди на hh по ссылке и откликнись сам, потом жми «Отметить отправленным».
-        </p>
-      )}
 
       {/* Список */}
       <div className="space-y-3">
@@ -400,21 +257,24 @@ export default function VacanciesPage() {
                   <a href={v.url} target="_blank" className="font-semibold text-blue-700 hover:underline">
                     {v.name}
                   </a>
+                  {v.hasTest && (
+                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700">тест</span>
+                  )}
                 </div>
                 <div className="text-sm text-zinc-500">
                   {v.employerName} · {v.areaName ?? "—"} · {salaryText(v)}
                 </div>
               </div>
               <div className="flex shrink-0 flex-wrap justify-end gap-2 text-sm">
-                <button
-                  onClick={() => makeLetter(v.id)}
-                  disabled={!selectedResume}
-                  className="rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-500 disabled:opacity-40"
-                >
-                  Письмо
-                </button>
-                {tab === "manual" && (
+                {tab === "new" && (
                   <>
+                    <button
+                      onClick={() => makeLetter(v.id)}
+                      disabled={!selectedResume}
+                      className="rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-500 disabled:opacity-40"
+                    >
+                      Письмо
+                    </button>
                     <a
                       href={v.url}
                       target="_blank"
@@ -427,16 +287,19 @@ export default function VacanciesPage() {
                       disabled={!selectedResume}
                       className="rounded border border-green-600 px-3 py-1 text-green-700 hover:bg-green-50 disabled:opacity-40"
                     >
-                      Отметить отправленным
+                      Занести в журнал
+                    </button>
+                    <button onClick={() => act(v.id, "skip")} className="rounded border border-zinc-300 px-3 py-1 hover:bg-zinc-50">
+                      Скрыть
+                    </button>
+                    <button onClick={() => act(v.id, "blacklist")} className="rounded border border-zinc-300 px-3 py-1 text-red-600 hover:bg-red-50">
+                      В ЧС
                     </button>
                   </>
                 )}
-                <button onClick={() => act(v.id, "skip")} className="rounded border border-zinc-300 px-3 py-1 hover:bg-zinc-50">
-                  Скрыть
-                </button>
-                <button onClick={() => act(v.id, "blacklist")} className="rounded border border-zinc-300 px-3 py-1 text-red-600 hover:bg-red-50">
-                  В ЧС
-                </button>
+                {tab === "applied" && (
+                  <span className="rounded bg-green-100 px-2 py-1 text-green-700">в журнале ✅</span>
+                )}
               </div>
             </div>
 
@@ -456,21 +319,15 @@ export default function VacanciesPage() {
                         className="w-full rounded border border-zinc-300 p-2 text-sm"
                       />
                       <div className="mt-2 flex flex-wrap gap-2">
-                        {tab === "auto" ? (
-                          <button
-                            onClick={() => apply(v.id)}
-                            className="rounded bg-green-600 px-4 py-2 text-sm text-white hover:bg-green-500"
-                          >
-                            Отправить отклик
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => navigator.clipboard.writeText(preview.letter)}
-                            className="rounded bg-green-600 px-4 py-2 text-sm text-white hover:bg-green-500"
-                          >
-                            Скопировать письмо
-                          </button>
-                        )}
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(preview.letter);
+                            setCopied(true);
+                          }}
+                          className="rounded bg-green-600 px-4 py-2 text-sm text-white hover:bg-green-500"
+                        >
+                          {copied ? "Скопировано ✓" : "Скопировать письмо"}
+                        </button>
                         <button
                           onClick={() => makeLetter(v.id)}
                           className="rounded border border-zinc-300 px-3 py-2 text-sm hover:bg-zinc-50"
@@ -498,7 +355,7 @@ export default function VacanciesPage() {
         ))}
         {vacancies.length === 0 && (
           <p className="text-zinc-500">
-            {tab === "auto" ? "Нет вакансий в очереди — запусти поиск выше." : "Нет вакансий с тестом."}
+            {tab === "new" ? "Нет вакансий в очереди — запусти поиск выше." : "Пока нет откликов в журнале."}
           </p>
         )}
       </div>

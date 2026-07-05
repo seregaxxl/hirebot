@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 
-// Отметить вакансию как «откликнулся вручную на hh» (для вакансий с тестом)
+// Занести в журнал: «откликнулся вручную на hh.ru».
+// letterSource: "LLM" | "TEMPLATE:<name>" | "MANUAL" — нужен для A/B-аналитики.
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -22,7 +23,7 @@ export async function POST(
       vacancyId: id,
       resumeId: body.resumeId,
       letter: body.letter ?? "(ручной отклик на hh.ru)",
-      letterSource: body.letter ? "LLM" : "MANUAL",
+      letterSource: body.letterSource ?? (body.letter ? "LLM" : "MANUAL"),
       status: "SENT",
       events: { create: { status: "SENT", source: "MANUAL" } },
     },

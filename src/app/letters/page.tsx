@@ -40,8 +40,8 @@ export default function LettersPage() {
       <h1 className="text-2xl font-bold">Шаблоны писем</h1>
       <p className="text-sm text-zinc-500">
         Плейсхолдеры: <code>{"{position}"}</code> — название вакансии, <code>{"{company}"}</code> — компания.
-        Если задан ANTHROPIC_API_KEY, письма по умолчанию генерируются персонально под вакансию,
-        а шаблоны — запасной вариант и материал для A/B-теста.
+        По умолчанию письма генерирует терминальный Claude персонально под вакансию,
+        а эти шаблоны — запасной вариант и материал для A/B-теста.
       </p>
 
       <div className="rounded-lg border border-zinc-200 bg-white p-4">

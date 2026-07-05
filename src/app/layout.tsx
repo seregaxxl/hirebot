@@ -4,13 +4,15 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Hirebot — воронка найма",
-  description: "Автоотклики hh.ru, письма и аналитика поиска работы",
+  description: "Журнал поиска работы: поиск вакансий, письма и аналитика воронки с коучем на Claude",
 };
 
 const nav = [
   { href: "/", label: "Дашборд" },
   { href: "/vacancies", label: "Вакансии" },
   { href: "/letters", label: "Письма" },
+  { href: "/plan", label: "План" },
+  { href: "/outreach", label: "Аутрич" },
   { href: "/settings", label: "Настройки" },
 ];
 

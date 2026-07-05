@@ -1,99 +1,54 @@
-import { prisma } from "./db";
-
 const API = "https://api.hh.ru";
 
 function userAgent() {
   return process.env.HH_USER_AGENT ?? "hirebot/1.0";
 }
 
-// ---------- OAuth ----------
+// ---------- Авторизация ----------
+//
+// API соискателей hh (OAuth-вход соискателя, отклики через /negotiations, свои
+// резюме) закрыт 15 декабря 2025. Поиск вакансий (/vacancies) теперь тоже требует
+// авторизацию, но на уровне ПРИЛОЖЕНИЯ (grant_type=client_credentials) — этот
+// поток жив, не относится к API соискателей и НЕ требует ngrok/redirect.
+// Нужны только HH_CLIENT_ID и HH_CLIENT_SECRET (приложение на dev.hh.ru).
 
-export function hhAuthUrl() {
-  const params = new URLSearchParams({
-    response_type: "code",
-    client_id: process.env.HH_CLIENT_ID ?? "",
-    redirect_uri: process.env.HH_REDIRECT_URI ?? "",
-  });
-  return `https://hh.ru/oauth/authorize?${params}`;
-}
+let appToken: { value: string; expiresAt: number } | null = null;
 
-async function saveTokens(data: {
-  access_token: string;
-  refresh_token: string;
-  expires_in: number;
-}) {
-  const expiresAt = Date.now() + data.expires_in * 1000;
-  const entries: [string, string][] = [
-    ["hh_access_token", data.access_token],
-    ["hh_refresh_token", data.refresh_token],
-    ["hh_token_expires_at", String(expiresAt)],
-  ];
-  for (const [key, value] of entries) {
-    await prisma.setting.upsert({
-      where: { key },
-      create: { key, value },
-      update: { value },
-    });
+async function fetchAppToken(): Promise<string> {
+  const clientId = process.env.HH_CLIENT_ID;
+  const clientSecret = process.env.HH_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    throw new HhApiError(
+      401,
+      "Не заданы HH_CLIENT_ID / HH_CLIENT_SECRET в .env. Зарегистрируй приложение на dev.hh.ru и впиши их — этого достаточно для поиска (ngrok не нужен)."
+    );
   }
-}
-
-async function getSetting(key: string) {
-  return (await prisma.setting.findUnique({ where: { key } }))?.value ?? null;
-}
-
-export async function isHhConnected() {
-  return Boolean(await getSetting("hh_access_token"));
-}
-
-async function tokenRequest(body: URLSearchParams) {
   const res = await fetch(`${API}/token`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       "HH-User-Agent": userAgent(),
     },
-    body,
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: clientId,
+      client_secret: clientSecret,
+    }),
   });
-  if (!res.ok) {
-    throw new Error(`hh token error ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new HhApiError(res.status, await res.text());
+  const data = (await res.json()) as { access_token: string; expires_in: number };
+  appToken = {
+    value: data.access_token,
+    expiresAt: Date.now() + data.expires_in * 1000,
+  };
+  return data.access_token;
+}
+
+async function accessToken(forceRefresh = false): Promise<string> {
+  if (!forceRefresh && appToken && Date.now() < appToken.expiresAt - 60_000) {
+    return appToken.value;
   }
-  return res.json();
-}
-
-export async function exchangeCode(code: string) {
-  const data = await tokenRequest(
-    new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: process.env.HH_CLIENT_ID ?? "",
-      client_secret: process.env.HH_CLIENT_SECRET ?? "",
-      code,
-      redirect_uri: process.env.HH_REDIRECT_URI ?? "",
-    })
-  );
-  await saveTokens(data);
-}
-
-async function refreshTokens() {
-  const refreshToken = await getSetting("hh_refresh_token");
-  if (!refreshToken) throw new Error("hh.ru не подключён — нет refresh token");
-  const data = await tokenRequest(
-    new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    })
-  );
-  await saveTokens(data);
-  return data.access_token as string;
-}
-
-async function accessToken() {
-  const token = await getSetting("hh_access_token");
-  if (!token) throw new Error("hh.ru не подключён — авторизуйся в настройках");
-  const expiresAt = Number(await getSetting("hh_token_expires_at"));
-  if (expiresAt && Date.now() > expiresAt - 60_000) {
-    return refreshTokens();
-  }
-  return token;
+  return fetchAppToken();
 }
 
 // ---------- API ----------
@@ -107,28 +62,20 @@ export class HhApiError extends Error {
   }
 }
 
-async function hhFetch(path: string, init: RequestInit = {}) {
-  let token = await accessToken();
-  const doFetch = (t: string) =>
+async function hhJson(path: string) {
+  const doFetch = (token: string) =>
     fetch(`${API}${path}`, {
-      ...init,
       headers: {
-        Authorization: `Bearer ${t}`,
+        Authorization: `Bearer ${token}`,
         "HH-User-Agent": userAgent(),
-        ...init.headers,
       },
     });
-  let res = await doFetch(token);
-  if (res.status === 403) {
-    // возможно истёк токен — одна попытка refresh
-    token = await refreshTokens();
-    res = await doFetch(token);
-  }
-  return res;
-}
 
-async function hhJson(path: string, init: RequestInit = {}) {
-  const res = await hhFetch(path, init);
+  let res = await doFetch(await accessToken());
+  if (res.status === 403 || res.status === 401) {
+    // токен приложения мог протухнуть — одна попытка с новым
+    res = await doFetch(await accessToken(true));
+  }
   if (!res.ok) throw new HhApiError(res.status, await res.text());
   return res.json();
 }
@@ -171,53 +118,6 @@ export async function searchVacancies(params: {
 
 export async function getVacancy(id: string): Promise<HhVacancy> {
   return hhJson(`/vacancies/${id}`);
-}
-
-export async function getMyResumes(): Promise<{
-  items: { id: string; title: string }[];
-}> {
-  return hhJson(`/resumes/mine`);
-}
-
-// Отклик на вакансию. Возвращает id переговоров (negotiation) если hh его отдал.
-export async function applyToVacancy(
-  vacancyId: string,
-  resumeId: string,
-  message: string
-): Promise<string | null> {
-  const form = new FormData();
-  form.set("vacancy_id", vacancyId);
-  form.set("resume_id", resumeId);
-  form.set("message", message);
-  const res = await hhFetch(`/negotiations`, { method: "POST", body: form });
-  if (!res.ok) throw new HhApiError(res.status, await res.text());
-  // hh возвращает 201 с Location: /negotiations/{id}
-  const location = res.headers.get("location") ?? "";
-  const match = location.match(/negotiations\/(.+)$/);
-  return match ? match[1] : null;
-}
-
-export type HhNegotiation = {
-  id: string;
-  state: { id: string }; // response | invitation | discard
-  vacancy?: { id: string };
-  viewed_by_opponent?: boolean;
-  updated_at?: string;
-};
-
-export async function getNegotiations(
-  page = 0
-): Promise<{ items: HhNegotiation[]; pages: number }> {
-  return hhJson(`/negotiations?per_page=100&page=${page}&order_by=updated_at`);
-}
-
-// «Поднять» резюме в выдаче (hh разрешает раз в 4 часа)
-export async function touchResume(resumeId: string) {
-  const res = await hhFetch(`/resumes/${resumeId}/publish`, { method: "POST" });
-  if (!res.ok && res.status !== 429) {
-    throw new HhApiError(res.status, await res.text());
-  }
-  return res.ok;
 }
 
 export function stripHtml(html: string) {
